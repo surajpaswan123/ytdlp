@@ -65,7 +65,7 @@ def extract_stream(url: str = Query(..., description="YouTube URL or video ID"))
         'allow_unplayable_formats': False,
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'mweb', 'tv']
+                'player_client': ['web', 'mweb', 'ios']
             }
         }
     }
