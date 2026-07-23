@@ -66,10 +66,13 @@ def extract_stream(url: str = Query(..., description="YouTube URL or video ID"))
         'allow_unplayable_formats': False,
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'mweb', 'web']
+                'player_client': ['android', 'ios', 'mweb', 'tv']
             }
         }
     }
+
+    if os.path.exists("cookies.txt"):
+        ydl_opts['cookiefile'] = "cookies.txt"
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
