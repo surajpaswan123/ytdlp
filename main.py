@@ -58,7 +58,6 @@ def extract_stream(url: str = Query(..., description="YouTube URL or video ID"))
 
     # Optimized yt-dlp options for fast stream extraction bypassing bot checks
     ydl_opts = {
-        'format': 'best',
         'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
