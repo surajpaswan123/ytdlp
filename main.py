@@ -91,17 +91,20 @@ def extract_stream(url: str = Query(..., description="YouTube URL or video ID"))
                 stream_url = info.get('hls_url')
                 is_live = True
 
-            # Fallback to available formats array if direct URL wasn't at top level
-            stream_url = info.get('url')
-            if not stream_url and 'formats' in info and len(info['formats']) > 0:
-                google_formats = [
-                    f for f in info['formats']
-                    if f.get('url') and 'googlevideo.com' in f.get('url', '')
-                ]
-                if google_formats:
-                    stream_url = google_formats[-1].get('url')
-                else:
-                    stream_url = info['formats'][-1].get('url')
+            # Pick playable direct video/audio stream URL, excluding storyboards and images
+            playable_formats = [
+                f for f in info.get('formats', [])
+                if f.get('url')
+                and not f.get('url', '').endswith('.jpg')
+                and not f.get('url', '').endswith('.png')
+                and 'storyboard' not in f.get('url', '')
+                and 'i.ytimg.com' not in f.get('url', '')
+                and f.get('ext') in ['mp4', 'm4a', 'webm', 'mp3', 'aac', 'm3u8']
+            ]
+            if playable_formats:
+                stream_url = playable_formats[-1].get('url')
+            elif not stream_url and 'formats' in info and len(info['formats']) > 0:
+                stream_url = info['formats'][-1].get('url')
 
             if not stream_url:
                 raise HTTPException(status_code=404, detail="Could not extract direct stream URL")
