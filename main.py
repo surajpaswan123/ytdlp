@@ -94,16 +94,12 @@ def extract_stream(url: str = Query(..., description="YouTube URL or video ID"))
             # Fallback to available formats array if direct URL wasn't at top level
             stream_url = info.get('url')
             if not stream_url and 'formats' in info and len(info['formats']) > 0:
-                # Filter out storyboard / image / non-media formats
-                valid_media_formats = [
+                google_formats = [
                     f for f in info['formats']
-                    if f.get('url')
-                    and f.get('vcodec') != 'none'
-                    and 'storyboard' not in f.get('url', '')
-                    and 'mhtml' not in f.get('format_note', '').lower()
+                    if f.get('url') and 'googlevideo.com' in f.get('url', '')
                 ]
-                if valid_media_formats:
-                    stream_url = valid_media_formats[-1].get('url')
+                if google_formats:
+                    stream_url = google_formats[-1].get('url')
                 else:
                     stream_url = info['formats'][-1].get('url')
 
