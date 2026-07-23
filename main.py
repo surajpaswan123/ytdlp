@@ -62,7 +62,6 @@ def extract_stream(url: str = Query(..., description="YouTube URL or video ID"))
         'quiet': True,
         'no_warnings': True,
         'skip_download': True,
-        'format': 'bestvideo+bestaudio/best',
         'ignoreerrors': True,
     }
 
