@@ -62,7 +62,6 @@ def extract_stream(url: str = Query(..., description="YouTube URL or video ID"))
         'quiet': True,
         'no_warnings': True,
         'skip_download': True,
-        'ignoreerrors': True,
     }
 
     if os.path.exists("cookies.txt"):
