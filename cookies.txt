@@ -1,0 +1,9 @@
+# Netscape HTTP Cookie File
+# https://curl.se/docs/http-cookies.html
+# This file is generated for yt-dlp stream extraction server
+
+.youtube.com	TRUE	/	FALSE	0	CONSENT	PENDING+999
+.youtube.com	TRUE	/	TRUE	0	SOCS	CAESEwgDEgk2OTU4NTM5MTAaAmVuIAEaBgiA_K-0Bg
+.youtube.com	TRUE	/	FALSE	0	GPS	1
+.youtube.com	TRUE	/	FALSE	0	YSC	1
+.youtube.com	TRUE	/	FALSE	0	VISITOR_INFO1_LIVE	1
