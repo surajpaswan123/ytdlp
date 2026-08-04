@@ -217,7 +217,26 @@ async def stream_media(url: str, request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
 
+@app.get("/test-fetch")
+async def test_fetch(url: str):
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=5.0) as client:
+            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            return {
+                "success": True,
+                "status_code": resp.status_code,
+                "headers": dict(resp.headers),
+                "body_length": len(resp.content)
+            }
+    except Exception as e:
+        return {
+            "success": False,
+            "error_type": type(e).__name__,
+            "error_message": str(e)
+        }
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
