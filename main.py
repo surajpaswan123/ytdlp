@@ -2,7 +2,7 @@ import os
 import re
 import time
 import urllib.parse
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import yt_dlp
@@ -178,106 +178,68 @@ async def stream_media(url: str, request: Request):
         if response.status_code not in [200, 206]:
             # Close the response stream and release the connection
             await response.aclose()
+            await client.aclose()
             raise HTTPException(
                 status_code=response.status_code,
                 detail=f"Source stream returned status {response.status_code}"
             )
 
-        # Prepare headers to return to client (Content-Type, Content-Length, Content-Range, Accept-Ranges)
-        response_headers = {}
-        for header_name in ["content-type", "content-length", "content-range", "accept-ranges"]:
-            val = response.headers.get(header_name)
-            if val:
-                response_headers[header_name] = val
+        if response.status_code == 206:
+            # Eagerly read partial content to avoid chunked transfer conflicts with Cloudflare/Render
+            body_bytes = await response.aread()
+            
+            # Prepare headers to return to client (Content-Type, Content-Length, Content-Range, Accept-Ranges)
+            response_headers = {}
+            for header_name in ["content-type", "content-length", "content-range", "accept-ranges"]:
+                val = response.headers.get(header_name)
+                if val:
+                    response_headers[header_name] = val
+            
+            await response.aclose()
+            await client.aclose()
+            
+            return Response(
+                content=body_bytes,
+                status_code=206,
+                headers=response_headers
+            )
+        else:
+            # For 200 OK responses, stream chunk-by-chunk using StreamingResponse
+            # Exclude Content-Length header to prevent Transfer-Encoding: chunked clashes
+            response_headers = {}
+            for header_name in ["content-type", "content-range", "accept-ranges"]:
+                val = response.headers.get(header_name)
+                if val:
+                    response_headers[header_name] = val
 
-        # Ensure Accept-Ranges is returned so players know they can seek
-        if "accept-ranges" not in response_headers:
-            response_headers["accept-ranges"] = "bytes"
+            # Ensure Accept-Ranges is returned so players know they can seek
+            if "accept-ranges" not in response_headers:
+                response_headers["accept-ranges"] = "bytes"
 
-        async def generate_chunks():
-            try:
-                # Stream content in chunks (e.g. 64KB)
-                async for chunk in response.iter_bytes(chunk_size=65536):
-                    yield chunk
-            except Exception as e:
-                # Handle connection issues during streaming gracefully
-                print(f"Streaming exception: {e}")
-            finally:
-                # Ensure the client connection to YouTube is closed
-                await response.aclose()
+            async def generate_chunks():
+                try:
+                    # Stream content in chunks (e.g. 64KB)
+                    async for chunk in response.iter_bytes(chunk_size=65536):
+                        yield chunk
+                except Exception as e:
+                    print(f"Streaming exception: {e}")
+                finally:
+                    # Ensure connections are closed
+                    await response.aclose()
+                    await client.aclose()
 
-        return StreamingResponse(
-            generate_chunks(),
-            status_code=response.status_code,
-            headers=response_headers
-        )
+            return StreamingResponse(
+                generate_chunks(),
+                status_code=200,
+                headers=response_headers
+            )
 
     except httpx.RequestError as e:
         raise HTTPException(status_code=502, detail=f"Failed to connect to source: {e}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
 
-@app.get("/test-fetch")
-async def test_fetch(url: str):
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=5.0) as client:
-            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-            return {
-                "success": True,
-                "status_code": resp.status_code,
-                "headers": dict(resp.headers),
-                "body_length": len(resp.content)
-            }
-    except Exception as e:
-        return {
-            "success": False,
-            "error_type": type(e).__name__,
-            "error_message": str(e)
-        }
-
-@app.get("/test-stream")
-async def test_stream(url: str, request: Request):
-    try:
-        decoded_url = urllib.parse.unquote(url)
-        while decoded_url != url:
-            url = decoded_url
-            decoded_url = urllib.parse.unquote(url)
-
-        headers = {}
-        range_header = request.headers.get("range")
-        if range_header:
-            headers["Range"] = range_header
-        headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        headers["Referer"] = "https://www.youtube.com/"
-
-        client = httpx.AsyncClient(follow_redirects=True, timeout=30.0)
-        req = client.build_request("GET", url, headers=headers)
-        response = await client.send(req, stream=True)
-        
-        response_headers = {}
-        for h in ["content-type", "content-length", "content-range", "accept-ranges"]:
-            val = response.headers.get(h)
-            if val:
-                response_headers[h] = val
-        
-        await response.aclose()
-        await client.aclose()
-        
-        return {
-            "success": True,
-            "status_code": response.status_code,
-            "headers": response_headers
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "error_type": type(e).__name__,
-            "error_message": str(e)
-        }
-
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
-
-
