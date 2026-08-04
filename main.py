@@ -1,10 +1,12 @@
 import os
 import re
 import time
-import subprocess
-from fastapi import FastAPI, HTTPException, Query
+import urllib.parse
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 import yt_dlp
+import httpx
 
 app = FastAPI(title="Church App yt-dlp Stream Extractor")
 
@@ -17,27 +19,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-LAST_UPDATE_CHECK = 0
-
-def check_auto_update():
-    global LAST_UPDATE_CHECK
-    now = time.time()
-    # Check for yt-dlp updates once every 24 hours (86400 seconds)
-    if now - LAST_UPDATE_CHECK > 86400:
-        try:
-            subprocess.run(["pip", "install", "--upgrade", "yt-dlp"], check=False)
-            LAST_UPDATE_CHECK = now
-        except Exception as e:
-            print(f"Auto-update check warning: {e}")
-
 @app.get("/")
 def health_check():
     return {"status": "online", "service": "yt-dlp stream extractor"}
 
 @app.get("/extract")
-def extract_stream(url: str = Query(..., description="YouTube URL or video ID")):
-    check_auto_update()
-
+def extract_stream(
+    url: str = Query(..., description="YouTube URL or video ID"),
+    type: str = Query("video", description="Type of stream: 'video' or 'audio'"),
+    request: Request = None
+):
     if not url or not url.strip():
         raise HTTPException(status_code=400, detail="Missing or empty url parameter")
 
@@ -88,17 +79,46 @@ def extract_stream(url: str = Query(..., description="YouTube URL or video ID"))
                 stream_url = info.get('hls_url')
                 is_live = True
             else:
-                # Pick playable direct video/audio stream URL, excluding storyboards and images
-                playable_formats = [
-                    f for f in info.get('formats', [])
-                    if f.get('url')
-                    and not f.get('url', '').endswith('.jpg')
-                    and not f.get('url', '').endswith('.png')
-                    and 'storyboard' not in f.get('url', '')
-                    and 'i.ytimg.com' not in f.get('url', '')
-                    and f.get('ext') in ['mp4', 'm4a', 'webm', 'mp3', 'aac', 'm3u8']
-                ]
+                formats = info.get('formats', [])
+                playable_formats = []
+                
+                if type == "audio":
+                    # Filter for audio-only streams (vcodec == 'none' and acodec != 'none')
+                    playable_formats = [
+                        f for f in formats
+                        if f.get('url')
+                        and f.get('vcodec') == 'none'
+                        and f.get('acodec') != 'none'
+                        and f.get('ext') in ['m4a', 'mp3', 'webm', 'aac', 'opus']
+                    ]
+                    # Sort by audio bitrate (abr)
+                    playable_formats.sort(key=lambda x: x.get('abr') or 0)
+                else:
+                    # Filter for progressive combined formats (both audio and video exist)
+                    playable_formats = [
+                        f for f in formats
+                        if f.get('url')
+                        and f.get('vcodec') != 'none'
+                        and f.get('acodec') != 'none'
+                        and f.get('ext') in ['mp4', 'm3u8', 'webm']
+                    ]
+                    # Sort by resolution/height
+                    playable_formats.sort(key=lambda x: x.get('height') or 0)
+
+                # Fallback to standard best formats if no matching filtered progressive/audio formats
+                if not playable_formats:
+                    playable_formats = [
+                        f for f in formats
+                        if f.get('url')
+                        and not f.get('url', '').endswith('.jpg')
+                        and not f.get('url', '').endswith('.png')
+                        and 'storyboard' not in f.get('url', '')
+                        and 'i.ytimg.com' not in f.get('url', '')
+                        and f.get('ext') in ['mp4', 'm4a', 'webm', 'mp3', 'aac', 'm3u8', 'opus']
+                    ]
+
                 if playable_formats:
+                    # Pick the highest quality matched format (last element after sorting)
                     stream_url = playable_formats[-1].get('url')
                 elif not stream_url and 'formats' in info and len(info['formats']) > 0:
                     stream_url = info['formats'][-1].get('url')
@@ -106,11 +126,18 @@ def extract_stream(url: str = Query(..., description="YouTube URL or video ID"))
             if not stream_url:
                 raise HTTPException(status_code=404, detail="Could not extract direct stream URL")
 
+            # Check if we should return a proxy url (especially for googlevideo URLs to bypass 403 IP lock)
+            # Live HLS (.m3u8) streams do not need proxying as their segments are distributed differently
+            proxy_url = stream_url
+            if request and "googlevideo.com" in stream_url:
+                encoded_url = urllib.parse.quote(stream_url)
+                proxy_url = f"{request.base_url}stream?url={encoded_url}"
+
             return {
                 "success": True,
                 "title": title,
                 "isLive": is_live,
-                "streamUrl": stream_url,
+                "streamUrl": proxy_url,
                 "thumbnail": thumbnail,
                 "extractedAt": int(time.time())
             }
@@ -118,6 +145,77 @@ def extract_stream(url: str = Query(..., description="YouTube URL or video ID"))
         raise HTTPException(status_code=400, detail=f"YouTube extraction error: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@app.get("/stream")
+async def stream_media(url: str, request: Request):
+    if not url:
+        raise HTTPException(status_code=400, detail="Missing url parameter")
+
+    # Decode URL if double encoded
+    decoded_url = urllib.parse.unquote(url)
+    while decoded_url != url:
+        url = decoded_url
+        decoded_url = urllib.parse.unquote(url)
+
+    # Forward Range headers
+    headers = {}
+    range_header = request.headers.get("range")
+    if range_header:
+        headers["Range"] = range_header
+
+    # Mask headers to resemble a standard browser request
+    headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    headers["Referer"] = "https://www.youtube.com/"
+
+    try:
+        # We set follow_redirects=True to handle Google Video CDN redirects automatically
+        client = httpx.AsyncClient(follow_redirects=True, timeout=30.0)
+        
+        # Build and send the request
+        req = client.build_request("GET", url, headers=headers)
+        response = await client.send(req, stream=True)
+
+        if response.status_code not in [200, 206]:
+            # Close the response stream and release the connection
+            await response.aclose()
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Source stream returned status {response.status_code}"
+            )
+
+        # Prepare headers to return to client (Content-Type, Content-Length, Content-Range, Accept-Ranges)
+        response_headers = {}
+        for header_name in ["content-type", "content-length", "content-range", "accept-ranges"]:
+            val = response.headers.get(header_name)
+            if val:
+                response_headers[header_name] = val
+
+        # Ensure Accept-Ranges is returned so players know they can seek
+        if "accept-ranges" not in response_headers:
+            response_headers["accept-ranges"] = "bytes"
+
+        async def generate_chunks():
+            try:
+                # Stream content in chunks (e.g. 64KB)
+                async for chunk in response.iter_bytes(chunk_size=65536):
+                    yield chunk
+            except Exception as e:
+                # Handle connection issues during streaming gracefully
+                print(f"Streaming exception: {e}")
+            finally:
+                # Ensure the client connection to YouTube is closed
+                await response.aclose()
+
+        return StreamingResponse(
+            generate_chunks(),
+            status_code=response.status_code,
+            headers=response_headers
+        )
+
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to connect to source: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
