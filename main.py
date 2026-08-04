@@ -235,8 +235,49 @@ async def test_fetch(url: str):
             "error_message": str(e)
         }
 
+@app.get("/test-stream")
+async def test_stream(url: str, request: Request):
+    try:
+        decoded_url = urllib.parse.unquote(url)
+        while decoded_url != url:
+            url = decoded_url
+            decoded_url = urllib.parse.unquote(url)
+
+        headers = {}
+        range_header = request.headers.get("range")
+        if range_header:
+            headers["Range"] = range_header
+        headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        headers["Referer"] = "https://www.youtube.com/"
+
+        client = httpx.AsyncClient(follow_redirects=True, timeout=30.0)
+        req = client.build_request("GET", url, headers=headers)
+        response = await client.send(req, stream=True)
+        
+        response_headers = {}
+        for h in ["content-type", "content-length", "content-range", "accept-ranges"]:
+            val = response.headers.get(h)
+            if val:
+                response_headers[h] = val
+        
+        await response.aclose()
+        await client.aclose()
+        
+        return {
+            "success": True,
+            "status_code": response.status_code,
+            "headers": response_headers
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error_type": type(e).__name__,
+            "error_message": str(e)
+        }
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
 
